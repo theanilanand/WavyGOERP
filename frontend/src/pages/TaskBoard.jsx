@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader, StatCard, StatusPill, EmptyState } from "@/components/module/ModulePrimitives";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -10,13 +11,72 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Plus, ClipboardList, CheckCircle2, Clock, Sparkles, Calendar as CalIcon, MessageSquare, Trash2, FileText, Paperclip, Download, X, ExternalLink, Github, Linkedin, Link as LinkIcon } from "lucide-react";
+import { Plus, ClipboardList, CheckCircle2, Clock, Sparkles, Calendar as CalIcon, MessageSquare, Trash2, FileText, Paperclip, Download, X, ExternalLink, Github, Linkedin, Link as LinkIcon, Loader2, List, LayoutGrid, ArrowUpDown, Calendar } from "lucide-react";
 import { api, formatApiError } from "@/lib/api";
 import { usePermission } from "@/hooks/usePermission";
 import { toast } from "sonner";
 
 const STATUS_ORDER = ["todo", "in_progress", "review", "completed", "cancelled"];
 const STATUS_LABEL = { todo: "To do", in_progress: "In progress", review: "Review", completed: "Completed", cancelled: "Cancelled" };
+
+function formatDateBadge(t) {
+  const dStr = t.due_date || t.created_at;
+  if (!dStr) {
+    return <span className="text-[12px] text-muted-foreground">---</span>;
+  }
+  const d = new Date(dStr);
+  if (isNaN(d.getTime())) {
+    return <span className="text-[12px] text-muted-foreground">---</span>;
+  }
+
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const isTomorrow = d.toDateString() === tomorrow.toDateString();
+
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+
+  const isOverdue = t.due_date && d < new Date(now.getFullYear(), now.getMonth(), now.getDate()) && t.status !== "completed" && t.status !== "cancelled";
+
+  if (isToday) {
+    return (
+      <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-300 dark:border-emerald-800 text-[11px] font-medium gap-1 shrink-0">
+        <Clock className="h-3 w-3" /> Today
+      </Badge>
+    );
+  }
+  if (isTomorrow) {
+    return (
+      <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-200 dark:border-blue-800 text-[11px] font-medium shrink-0">
+        Tomorrow
+      </Badge>
+    );
+  }
+  if (isYesterday) {
+    return (
+      <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800 text-[11px] font-medium shrink-0">
+        Yesterday
+      </Badge>
+    );
+  }
+  if (isOverdue) {
+    return (
+      <Badge variant="destructive" className="text-[11px] font-medium shrink-0">
+        Overdue · {d.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+      </Badge>
+    );
+  }
+
+  return (
+    <span className="text-[12px] text-foreground/85 font-medium shrink-0" title={d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}>
+      {t.due_date ? `Due ${d.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}` : d.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+    </span>
+  );
+}
 
 function initials(name) {
   return (name || "?").split(" ").map(s => s[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
@@ -35,64 +95,58 @@ function getLinkLabel(url) {
   const l = url.toLowerCase();
   if (l.includes("github.com")) return "GitHub";
   if (l.includes("linkedin.com")) return "LinkedIn";
-  return "Link";
+  return "Reference";
 }
 
-function PdfChip({ url, name, onRemove }) {
-  const displayName = name || "Document.pdf";
+function PdfChip({ url, name }) {
+  if (!url) return null;
   return (
-    <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-500/10 text-red-700 dark:text-red-300 border border-red-500/20 text-xs">
-      <FileText className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400" />
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="font-medium hover:underline truncate max-w-[180px]"
-        title={displayName}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {displayName}
-      </a>
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        download={displayName}
-        className="text-muted-foreground hover:text-foreground p-0.5"
-        title="Download PDF"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <Download className="h-3 w-3" />
-      </a>
-      {onRemove && (
-        <button type="button" onClick={onRemove} className="text-muted-foreground hover:text-destructive p-0.5">
-          <X className="h-3 w-3" />
-        </button>
-      )}
-    </div>
+    <a
+      href={url}
+      download={name || "Document.pdf"}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-200 dark:border-red-900/40 text-[11px] font-medium transition-colors"
+      title="Click to view/download PDF"
+    >
+      <FileText className="h-3.5 w-3.5 text-red-500" />
+      <span className="truncate max-w-[180px]">{name || "Document.pdf"}</span>
+      <Download className="h-3 w-3 ml-0.5 opacity-70" />
+    </a>
   );
 }
 
 function TaskCard({ task, onOpen }) {
-  const pdfCount = (task.attachments || []).length;
   return (
     <div
+      onClick={() => onOpen(task)}
       draggable
       onDragStart={(e) => e.dataTransfer.setData("text/task-id", task.id)}
-      onClick={() => onOpen(task)}
-      className="group p-3 rounded-lg border border-border bg-card hover:border-primary/40 hover-lift cursor-pointer space-y-2"
+      className="rounded-lg bg-card border border-border p-3.5 shadow-sm hover:border-primary/40 cursor-pointer space-y-2 group transition-all"
       data-testid={`task-card-${task.id}`}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-[13.5px] font-medium leading-snug text-foreground line-clamp-2">{task.title}</div>
+        <span className="text-[13.5px] font-medium text-foreground line-clamp-2 leading-snug group-hover:text-primary transition-colors">
+          {task.title}
+        </span>
         <StatusPill status={task.priority} />
       </div>
 
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {task.module && <Badge variant="secondary" className="text-[10px]">{task.module}</Badge>}
-        {pdfCount > 0 && (
-          <Badge variant="outline" className="text-[10px] gap-1 bg-red-500/10 text-red-600 border-red-200 dark:border-red-900">
-            <FileText className="h-3 w-3" /> {pdfCount} PDF
+      {task.description && (
+        <p className="text-[12px] text-muted-foreground line-clamp-2">{task.description}</p>
+      )}
+
+      {/* Badges container */}
+      <div className="flex flex-wrap gap-1.5 items-center pt-0.5">
+        {task.attachments?.length > 0 && (
+          <Badge variant="outline" className="text-[10px] gap-1 bg-red-500/10 text-red-600 border-red-200 font-normal">
+            <FileText className="h-3 w-3" /> PDF ({task.attachments.length})
+          </Badge>
+        )}
+        {task.comments?.length > 0 && (
+          <Badge variant="outline" className="text-[10px] gap-1 font-normal">
+            <MessageSquare className="h-3 w-3" /> {task.comments.length}
           </Badge>
         )}
         {task.link && (
@@ -178,6 +232,8 @@ export default function TaskBoard() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTask, setActiveTask] = useState(null);
   const [form, setForm] = useState({ title: "", description: "", status: "todo", priority: "medium", module: "General", attachments: [], link: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [actionLoadingId, setActionLoadingId] = useState(null);
 
   const [comment, setComment] = useState("");
   const [commentPdf, setCommentPdf] = useState(null); // { url, name }
@@ -201,13 +257,85 @@ export default function TaskBoard() {
     }
   }
 
+  const [searchParams, setSearchParams] = useSearchParams();
+
   useEffect(() => { load(); }, []);
 
+  useEffect(() => {
+    if (searchParams.get("create") === "task" || searchParams.get("action") === "create-task") {
+      setForm({ title: "", description: "", status: "todo", priority: "medium", module: "General", attachments: [], link: "" });
+      setOpen(true);
+      setSearchParams(params => {
+        params.delete("create");
+        params.delete("action");
+        return params;
+      }, { replace: true });
+    }
+  }, [searchParams]);
+
+  const [sortBy, setSortBy] = useState("current-first");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [moduleFilter, setModuleFilter] = useState("all");
+
+  const modules = useMemo(() => {
+    const set = new Set(["General"]);
+    tasks.forEach(t => { if (t.module) set.add(t.module); });
+    return Array.from(set);
+  }, [tasks]);
+
   const filtered = useMemo(() => {
-    if (!q) return tasks;
-    const t = q.toLowerCase();
-    return tasks.filter(x => JSON.stringify(x).toLowerCase().includes(t));
-  }, [tasks, q]);
+    let list = tasks;
+    if (q) {
+      const t = q.toLowerCase();
+      list = list.filter(x => JSON.stringify(x).toLowerCase().includes(t));
+    }
+    if (statusFilter !== "all") {
+      list = list.filter(x => x.status === statusFilter);
+    }
+    if (moduleFilter !== "all") {
+      list = list.filter(x => x.module === moduleFilter);
+    }
+
+    const now = new Date();
+    const isDateToday = (dStr) => {
+      if (!dStr) return false;
+      const d = new Date(dStr);
+      return !isNaN(d.getTime()) && d.toDateString() === now.toDateString();
+    };
+
+    const getTaskTime = (t) => {
+      const d = t.due_date || t.created_at;
+      return d ? new Date(d).getTime() : 0;
+    };
+
+    return [...list].sort((a, b) => {
+      if (sortBy === "current-first") {
+        // Today / current tasks on top
+        const aToday = isDateToday(a.due_date) || isDateToday(a.created_at);
+        const bToday = isDateToday(b.due_date) || isDateToday(b.created_at);
+        if (aToday && !bToday) return -1;
+        if (!aToday && bToday) return 1;
+        // Then newest / latest dates first
+        return getTaskTime(b) - getTaskTime(a);
+      }
+      if (sortBy === "date-asc") {
+        return getTaskTime(a) - getTaskTime(b);
+      }
+      if (sortBy === "due-urgent") {
+        const dueA = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+        const dueB = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+        return dueA - dueB;
+      }
+      if (sortBy === "priority-desc") {
+        const pMap = { urgent: 4, high: 3, medium: 2, low: 1 };
+        return (pMap[b.priority] || 0) - (pMap[a.priority] || 0);
+      }
+      if (sortBy === "title-asc") {
+        return (a.title || "").localeCompare(b.title || "");
+      }
+      return getTaskTime(b) - getTaskTime(a);
+    });
+  }, [tasks, q, statusFilter, moduleFilter, sortBy]);
 
   const byStatus = useMemo(() => {
     const m = Object.fromEntries(STATUS_ORDER.map(s => [s, []]));
@@ -238,21 +366,31 @@ export default function TaskBoard() {
   }
 
   async function createTask() {
+    setSubmitting(true);
     try {
       await api.post("/tasks", form);
       toast.success("Task created");
       setOpen(false);
       setForm({ title: "", description: "", status: "todo", priority: "medium", module: "General", attachments: [], link: "" });
       load();
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function setStatus(id, status) {
+    setActionLoadingId(`status-${id}`);
     try {
       await api.patch(`/tasks/${id}/status`, { status });
       toast.success(`Task status updated to ${STATUS_LABEL[status] || status}`);
       load();
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setActionLoadingId(null);
+    }
   }
 
   async function openDetail(t) {
@@ -270,6 +408,7 @@ export default function TaskBoard() {
 
   async function saveTaskLink() {
     if (!activeTask) return;
+    setActionLoadingId(`link-${activeTask.id}`);
     try {
       await api.patch(`/tasks/${activeTask.id}`, { link: linkInput.trim() });
       const { data } = await api.get(`/tasks/${activeTask.id}`);
@@ -277,11 +416,16 @@ export default function TaskBoard() {
       setEditingLink(false);
       load();
       toast.success("Reference link saved");
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setActionLoadingId(null);
+    }
   }
 
   async function addComment() {
     if ((!comment.trim() && !commentPdf) || !activeTask) return;
+    setActionLoadingId(`comment-${activeTask.id}`);
     try {
       const payload = {
         body: comment.trim() || (commentPdf ? `Attached document: ${commentPdf.name}` : ""),
@@ -295,11 +439,16 @@ export default function TaskBoard() {
       setActiveTask(data);
       load();
       toast.success("Comment added");
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setActionLoadingId(null);
+    }
   }
 
   async function addPdfToActiveTask(pdfObj) {
     if (!activeTask) return;
+    setActionLoadingId(`pdf-${activeTask.id}`);
     try {
       const currentAttachments = activeTask.attachments || [];
       const updatedAttachments = [...currentAttachments, pdfObj.url];
@@ -308,17 +457,26 @@ export default function TaskBoard() {
       setActiveTask(data);
       load();
       toast.success("PDF document attached to task");
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setActionLoadingId(null);
+    }
   }
 
   async function deleteTask(id) {
     if (!confirm("Delete this task?")) return;
+    setActionLoadingId(`del-${id}`);
     try {
       await api.delete(`/tasks/${id}`);
       toast.success("Task deleted");
       setDetailOpen(false);
       load();
-    } catch (e) { toast.error(formatApiError(e)); }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setActionLoadingId(null);
+    }
   }
 
   const userOpts = users.map(u => ({ value: u.id, label: u.name }));
@@ -347,14 +505,137 @@ export default function TaskBoard() {
         </div>
       )}
 
-      <Input placeholder="Filter tasks by title, assignee, module…" value={q} onChange={(e) => setQ(e.target.value)} className="max-w-md" data-testid="task-search" />
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="flex-1 flex flex-wrap items-center gap-2.5">
+          <Input
+            placeholder="Filter tasks by title, assignee, module…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="w-full sm:max-w-xs h-9 text-[13px]"
+            data-testid="task-search"
+          />
 
-      <Tabs defaultValue="kanban">
-        <TabsList>
-          <TabsTrigger value="kanban" data-testid="task-tab-kanban">Kanban</TabsTrigger>
-          <TabsTrigger value="list" data-testid="task-tab-list">List</TabsTrigger>
-          <TabsTrigger value="calendar" data-testid="task-tab-calendar">Calendar</TabsTrigger>
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-[130px] h-9 text-[12.5px]">
+              <SelectValue placeholder="Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Statuses</SelectItem>
+              {STATUS_ORDER.map(s => (
+                <SelectItem key={s} value={s}>{STATUS_LABEL[s] || s}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={moduleFilter} onValueChange={setModuleFilter}>
+            <SelectTrigger className="w-[130px] h-9 text-[12.5px]">
+              <SelectValue placeholder="Module" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Modules</SelectItem>
+              {modules.map(m => (
+                <SelectItem key={m} value={m}>{m}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[12px] text-muted-foreground flex items-center gap-1">
+            <ArrowUpDown className="h-3.5 w-3.5" /> Sort:
+          </span>
+          <Select value={sortBy} onValueChange={setSortBy}>
+            <SelectTrigger className="w-[185px] h-9 text-[12.5px]">
+              <SelectValue placeholder="Sort order" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="current-first">Current / Newest first</SelectItem>
+              <SelectItem value="date-asc">Oldest first</SelectItem>
+              <SelectItem value="due-urgent">Due Date (Urgent)</SelectItem>
+              <SelectItem value="priority-desc">Priority (High to Low)</SelectItem>
+              <SelectItem value="title-asc">Title (A to Z)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <Tabs defaultValue="list">
+        <TabsList className="bg-muted/60 p-1">
+          <TabsTrigger value="list" data-testid="task-tab-list" className="gap-1.5">
+            <List className="h-4 w-4" /> List
+          </TabsTrigger>
+          <TabsTrigger value="kanban" data-testid="task-tab-kanban" className="gap-1.5">
+            <LayoutGrid className="h-4 w-4" /> Kanban
+          </TabsTrigger>
+          <TabsTrigger value="calendar" data-testid="task-tab-calendar" className="gap-1.5">
+            <CalIcon className="h-4 w-4" /> Calendar
+          </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="list" className="mt-4">
+          <Card className="border-border">
+            {filtered.length === 0 ? (
+              <EmptyState icon={ClipboardList} title="No tasks match your filter" />
+            ) : (
+              <div>
+                <div className="hidden sm:grid sm:grid-cols-12 gap-4 px-5 py-3 bg-muted/40 text-[11.5px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border">
+                  <div className="col-span-6">Task Title & Details</div>
+                  <div className="col-span-2">Date / Due</div>
+                  <div className="col-span-2">Priority</div>
+                  <div className="col-span-2 text-right">Status</div>
+                </div>
+                <div className="divide-y divide-border">
+                  {filtered.map(t => (
+                    <div
+                      key={t.id}
+                      onClick={() => openDetail(t)}
+                      className="flex flex-col sm:grid sm:grid-cols-12 gap-3 sm:gap-4 px-5 py-3.5 hover:bg-muted/40 transition-colors cursor-pointer items-start sm:items-center"
+                    >
+                      <div className="col-span-6 min-w-0">
+                        <div className="text-[13.5px] font-medium truncate flex items-center gap-2">
+                          <span className="truncate">{t.title}</span>
+                          {t.attachments?.length > 0 && (
+                            <Badge variant="outline" className="text-[10px] gap-1 bg-red-500/10 text-red-600 border-red-200 font-normal shrink-0">
+                              <FileText className="h-3 w-3" /> PDF
+                            </Badge>
+                          )}
+                          {t.link && (
+                            <Badge variant="outline" className="text-[10px] gap-1 bg-primary/10 text-primary border-primary/20 font-normal shrink-0">
+                              {getLinkIcon(t.link)} {getLinkLabel(t.link)}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-[11.5px] text-muted-foreground flex items-center gap-2 mt-0.5">
+                          <span className="font-medium text-foreground/75">{t.module}</span>
+                          <span>·</span>
+                          <span className="flex items-center gap-1.5">
+                            <Avatar className="h-4 w-4 text-[9px]">
+                              {t.assignee_photo ? <AvatarImage src={t.assignee_photo} /> : null}
+                              <AvatarFallback className="text-[9px]">{initials(t.assignee_name)}</AvatarFallback>
+                            </Avatar>
+                            {t.assignee_name || "Unassigned"}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="col-span-2 flex items-center">
+                        {formatDateBadge(t)}
+                      </div>
+
+                      <div className="col-span-2 flex items-center">
+                        <StatusPill status={t.priority} />
+                      </div>
+
+                      <div className="col-span-2 flex justify-end items-center">
+                        <StatusPill status={t.status} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Card>
+        </TabsContent>
 
         <TabsContent value="kanban" className="mt-4">
           <div className="flex gap-3 overflow-x-auto scrollbar-thin pb-4">
@@ -370,35 +651,6 @@ export default function TaskBoard() {
               />
             ))}
           </div>
-        </TabsContent>
-
-        <TabsContent value="list" className="mt-4">
-          <Card className="border-border">
-            {filtered.length === 0 ? (
-              <EmptyState icon={ClipboardList} title="No tasks match your filter" />
-            ) : (
-              <div className="divide-y divide-border">
-                {filtered.map(t => (
-                  <div key={t.id} onClick={() => openDetail(t)} className="flex items-center gap-4 px-4 py-3 hover:bg-muted/40 cursor-pointer">
-                    <StatusPill status={t.status} />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[13.5px] font-medium truncate flex items-center gap-2">
-                        <span>{t.title}</span>
-                        {t.attachments?.length > 0 && (
-                          <Badge variant="outline" className="text-[10px] gap-1 bg-red-500/10 text-red-600 border-red-200 font-normal">
-                            <FileText className="h-3 w-3" /> PDF
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="text-[11.5px] text-muted-foreground">{t.module} · {t.assignee_name || "Unassigned"}</div>
-                    </div>
-                    <StatusPill status={t.priority} />
-                    {t.due_date && <div className="text-[12px] text-muted-foreground hidden sm:block">{new Date(t.due_date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</div>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
         </TabsContent>
 
         <TabsContent value="calendar" className="mt-4">
@@ -522,8 +774,11 @@ export default function TaskBoard() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={createTask} data-testid="task-submit-btn">Create task</Button>
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={submitting}>Cancel</Button>
+            <Button onClick={createTask} disabled={submitting} data-testid="task-submit-btn">
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {submitting ? "Creating task..." : "Create task"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -545,7 +800,7 @@ export default function TaskBoard() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Status</div>
-                    <Select value={activeTask.status} onValueChange={(v) => setStatus(activeTask.id, v).then(() => openDetail({ ...activeTask, status: v }))}>
+                    <Select value={activeTask.status} onValueChange={(v) => setStatus(activeTask.id, v).then(() => openDetail({ ...activeTask, status: v }))} disabled={actionLoadingId === `status-${activeTask.id}`}>
                       <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                       <SelectContent>{STATUS_ORDER.map(s => <SelectItem key={s} value={s}>{STATUS_LABEL[s]}</SelectItem>)}</SelectContent>
                     </Select>
@@ -597,9 +852,13 @@ export default function TaskBoard() {
                         value={linkInput}
                         onChange={(e) => setLinkInput(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && saveTaskLink()}
+                        disabled={actionLoadingId === `link-${activeTask.id}`}
                       />
-                      <Button size="sm" className="h-8 px-3 text-xs" onClick={saveTaskLink}>Save</Button>
-                      <Button size="sm" variant="outline" className="h-8 px-2 text-xs" onClick={() => setEditingLink(false)}>Cancel</Button>
+                      <Button size="sm" className="h-8 px-3 text-xs" onClick={saveTaskLink} disabled={actionLoadingId === `link-${activeTask.id}`}>
+                        {actionLoadingId === `link-${activeTask.id}` ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                        Save
+                      </Button>
+                      <Button size="sm" variant="outline" className="h-8 px-2 text-xs" onClick={() => setEditingLink(false)} disabled={actionLoadingId === `link-${activeTask.id}`}>Cancel</Button>
                     </div>
                   ) : activeTask.link ? (
                     <div className="flex items-center gap-2">
@@ -639,8 +898,10 @@ export default function TaskBoard() {
                       size="sm"
                       className="h-7 text-xs gap-1 text-primary"
                       onClick={() => detailFileInputRef.current?.click()}
+                      disabled={actionLoadingId === `pdf-${activeTask.id}`}
                     >
-                      <Plus className="h-3.5 w-3.5" /> Attach PDF
+                      {actionLoadingId === `pdf-${activeTask.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <Plus className="h-3.5 w-3.5" />}
+                      Attach PDF
                     </Button>
                   </div>
 
@@ -705,6 +966,7 @@ export default function TaskBoard() {
                         value={comment}
                         onChange={(e) => setComment(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && addComment()}
+                        disabled={actionLoadingId === `comment-${activeTask.id}`}
                       />
 
                       <input
@@ -722,18 +984,27 @@ export default function TaskBoard() {
                         className={`h-9 w-9 shrink-0 ${commentPdf ? "border-red-500 bg-red-50 text-red-600 dark:bg-red-950" : ""}`}
                         title="Attach PDF Document"
                         onClick={() => commentFileInputRef.current?.click()}
+                        disabled={actionLoadingId === `comment-${activeTask.id}`}
                       >
                         <Paperclip className="h-4 w-4" />
                       </Button>
 
-                      <Button size="sm" onClick={addComment} className="h-9 px-4">Post</Button>
+                      <Button size="sm" onClick={addComment} disabled={actionLoadingId === `comment-${activeTask.id}`} className="h-9 px-4">
+                        {actionLoadingId === `comment-${activeTask.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : null}
+                        Post
+                      </Button>
                     </div>
                   </div>
                 </div>
               </div>
 
               <DialogFooter>
-                {canDelete && <Button variant="ghost" onClick={() => deleteTask(activeTask.id)} className="text-destructive"><Trash2 className="h-4 w-4 mr-1.5" /> Delete</Button>}
+                {canDelete && (
+                  <Button variant="ghost" onClick={() => deleteTask(activeTask.id)} disabled={actionLoadingId === `del-${activeTask.id}`} className="text-destructive">
+                    {actionLoadingId === `del-${activeTask.id}` ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Trash2 className="h-4 w-4 mr-1.5" />}
+                    Delete
+                  </Button>
+                )}
                 <Button onClick={() => setDetailOpen(false)}>Close</Button>
               </DialogFooter>
             </>

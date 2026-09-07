@@ -1,8 +1,14 @@
 import axios from "axios";
 
-const BASE = process.env.REACT_APP_BACKEND_URL;
-export const API_BASE = `${BASE}/api`;
+function getApiBase() {
+  const envUrl = (process.env.REACT_APP_BACKEND_URL || "").trim().replace(/\/+$/, "");
+  if (envUrl && !envUrl.includes("emergentagent.com") && !envUrl.includes("preview")) {
+    return envUrl.endsWith("/api") ? envUrl : `${envUrl}/api`;
+  }
+  return "/api";
+}
 
+export const API_BASE = getApiBase();
 export const api = axios.create({ baseURL: API_BASE });
 
 const ACCESS_KEY = "wavygo_access";

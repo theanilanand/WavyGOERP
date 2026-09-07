@@ -1,14 +1,17 @@
 from __future__ import annotations
+import os
+import re
 import secrets
 import string
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from bson import ObjectId
 from db import get_db
 from auth_utils import get_current_user, require_roles, hash_password
 from models import UserPublic
 from models_part2 import DepartmentIn, EmployeeInviteIn, AttendanceIn, LeaveIn, PerformanceIn
 from hub_utils import serialize, serialize_many, oid, utc_iso, log_activity, notify
+from email_utils import send_invitation_email, send_password_reset_email
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -47,55 +50,372 @@ async def list_employees(q: str | None = None, department: str | None = None, ro
 
 @router.post("/invite", status_code=201)
 async def invite_employee(payload: EmployeeInviteIn,
+                          background_tasks: BackgroundTasks,
                           current: UserPublic = Depends(require_roles("Founder", "Admin"))):
     db = get_db()
+    name = (payload.name or "").strip()
+    email = (payload.email or "").lower().strip()
+    if not name:
+        raise HTTPException(400, "Full name is required")
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(400, "Please provide a valid email address")
+    if payload.role not in ("Admin", "Manager", "Employee", "Intern"):
+        raise HTTPException(400, "Invalid role specified")
     if payload.role == "Founder":
         raise HTTPException(403, "Cannot create another Founder")
     if payload.role == "Admin" and current.role != "Founder":
         raise HTTPException(403, "Only the Founder can create an Admin")
-    email = payload.email.lower().strip()
-    if await db.users.find_one({"email": email}):
-        raise HTTPException(409, "Email already exists")
-    default_pw = "Wavygo@2026"
-    doc = {
+    existing_user = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    if existing_user and existing_user.get("status") == "active" and (existing_user.get("is_active") is True or existing_user.get("active") is True):
+        raise HTTPException(409, "Email is already registered as an active employee")
+
+    frontend_url = os.environ.get("FRONTEND_URL", "https://app-eta-flax-97.vercel.app")
+    token = secrets.token_urlsafe(32)
+    invite_url = f"{frontend_url}/accept-invite?token={token}"
+
+    if existing_user:
+        await db.users.update_one(
+            {"_id": existing_user["_id"]},
+            {"$set": {
+                "name": name,
+                "role": payload.role,
+                "designation": payload.designation,
+                "department": payload.department,
+                "phone": payload.phone,
+                "status": "deactivated",
+                "is_active": False,
+                "active": False,
+                "invited_by": current.name,
+                "updated_at": utc_iso()
+            }}
+        )
+        user_id = str(existing_user["_id"])
+    else:
+        user_doc = {
+            "email": email,
+            "name": name,
+            "role": payload.role,
+            "designation": payload.designation,
+            "department": payload.department,
+            "phone": payload.phone,
+            "password_hash": "",
+            "status": "deactivated",
+            "is_active": False,
+            "active": False,
+            "online": False,
+            "invited_by": current.name,
+            "created_at": utc_iso(),
+            "updated_at": utc_iso(),
+        }
+        res_u = await db.users.insert_one(user_doc)
+        user_id = str(res_u.inserted_id)
+
+    inv_doc = {
+        "token": token,
         "email": email,
-        "name": payload.name.strip(),
+        "name": name,
         "role": payload.role,
         "designation": payload.designation,
         "department": payload.department,
         "phone": payload.phone,
-        "password_hash": hash_password(default_pw),
-        "online": False,
+        "status": "pending",
+        "invited_by": current.name,
+        "user_id": user_id,
         "created_at": utc_iso(),
-        "updated_at": utc_iso(),
     }
-    res = await db.users.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    await log_activity(db, current, "Invited employee", "Employees", target=payload.name)
-    await notify(db, None, "New teammate joined", f"{payload.name} was invited by {current.name} as {payload.role}.",
+    await db.invitations.delete_many({"email": email})
+    res = await db.invitations.insert_one(inv_doc)
+    inv_doc["_id"] = res.inserted_id
+
+    background_tasks.add_task(
+        send_invitation_email,
+        recipient_email=email,
+        recipient_name=name,
+        role=payload.role,
+        token=token,
+        invited_by=current.name,
+        designation=payload.designation,
+        department=payload.department
+    )
+
+    await log_activity(db, current, "Sent employee invitation", "Employees", target=name)
+    return {
+        **serialize(inv_doc),
+        "token": token,
+        "invite_url": invite_url,
+        "user_id": user_id,
+        "message": f"Invitation email sent to {email}. Employee added to database as deactivated pending invitation accept."
+    }
+
+
+@router.get("/invitations")
+async def list_invitations(current: UserPublic = Depends(require_roles("Founder", "Admin", "Manager"))):
+    db = get_db()
+    docs = await db.invitations.find().sort("created_at", -1).to_list(500)
+    return serialize_many(docs)
+
+
+@router.get("/invite/{token}")
+async def get_invite_details(token: str):
+    db = get_db()
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(404, "Invalid or expired invitation link")
+    return {
+        "email": inv["email"],
+        "name": inv["name"],
+        "role": inv["role"],
+        "designation": inv.get("designation"),
+        "department": inv.get("department"),
+        "phone": inv.get("phone"),
+        "invited_by": inv.get("invited_by"),
+        "status": inv.get("status", "pending"),
+        "already_accepted": inv.get("status") == "accepted",
+    }
+
+
+@router.post("/accept-invite")
+async def accept_invite(payload: dict):
+    token = payload.get("token")
+    password = payload.get("password")
+    if not token:
+        raise HTTPException(400, "Invitation token is required")
+    
+    db = get_db()
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(404, "Invalid or expired invitation link")
+    
+    email = inv["email"].lower().strip()
+    if inv.get("status") == "accepted":
+        return {
+            "ok": True,
+            "email": email,
+            "already_accepted": True,
+            "message": "Invitation already accepted! Redirecting to login page..."
+        }
+
+    if not password or len(password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters long")
+    
+    existing_user = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    if existing_user:
+        await db.users.update_one(
+            {"_id": existing_user["_id"]},
+            {"$set": {
+                "password_hash": hash_password(password),
+                "name": inv["name"],
+                "role": inv["role"],
+                "designation": inv.get("designation"),
+                "department": inv.get("department"),
+                "phone": inv.get("phone"),
+                "status": "active",
+                "is_active": True,
+                "active": True,
+                "updated_at": utc_iso()
+            }}
+        )
+    else:
+        user_doc = {
+            "email": email,
+            "name": inv["name"],
+            "role": inv["role"],
+            "designation": inv.get("designation"),
+            "department": inv.get("department"),
+            "phone": inv.get("phone"),
+            "password_hash": hash_password(password),
+            "status": "active",
+            "is_active": True,
+            "active": True,
+            "online": False,
+            "created_at": utc_iso(),
+            "updated_at": utc_iso(),
+        }
+        await db.users.insert_one(user_doc)
+
+    await db.invitations.update_one(
+        {"_id": inv["_id"]},
+        {"$set": {"status": "accepted", "accepted_at": utc_iso()}}
+    )
+
+    await notify(db, None, "New teammate joined", f"{inv['name']} accepted the invitation and joined as {inv['role']}.",
                  kind="success", link="/employees")
-    return {**serialize(doc), "temp_password": default_pw}
+    
+    return {"ok": True, "email": email, "message": "Invitation accepted successfully! Redirecting to login page..."}
+
+
+@router.post("/invitations/{invite_id}/resend")
+async def resend_invitation(invite_id: str, background_tasks: BackgroundTasks, current: UserPublic = Depends(require_roles("Founder", "Admin"))):
+    db = get_db()
+    invite_id_str = str(invite_id).strip()
+    inv = None
+
+    if ObjectId.is_valid(invite_id_str):
+        inv = await db.invitations.find_one({"_id": ObjectId(invite_id_str)})
+    if not inv:
+        inv = await db.invitations.find_one({"_id": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"token": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"email": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"email": {"$regex": f"^{re.escape(invite_id_str)}$", "$options": "i"}})
+    if not inv:
+        async for doc in db.invitations.find():
+            if str(doc.get("_id")) == invite_id_str or str(doc.get("id")) == invite_id_str or doc.get("token") == invite_id_str or doc.get("email") == invite_id_str:
+                inv = doc
+                break
+
+    if not inv:
+        raise HTTPException(404, "Pending invitation not found")
+    
+    background_tasks.add_task(
+        send_invitation_email,
+        recipient_email=inv["email"],
+        recipient_name=inv["name"],
+        role=inv["role"],
+        token=inv["token"],
+        invited_by=current.name,
+        designation=inv.get("designation"),
+        department=inv.get("department")
+    )
+    return {"ok": True, "message": f"Invitation email is being resent to {inv['email']}"}
+
+
+@router.delete("/invitations/{invite_id}", status_code=200)
+async def delete_invitation(invite_id: str, current: UserPublic = Depends(require_roles("Founder", "Admin"))):
+    db = get_db()
+    invite_id_str = str(invite_id).strip()
+    inv = None
+
+    if ObjectId.is_valid(invite_id_str):
+        inv = await db.invitations.find_one({"_id": ObjectId(invite_id_str)})
+    if not inv:
+        inv = await db.invitations.find_one({"_id": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"token": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"email": invite_id_str})
+    if not inv:
+        inv = await db.invitations.find_one({"email": {"$regex": f"^{re.escape(invite_id_str)}$", "$options": "i"}})
+    if not inv:
+        async for doc in db.invitations.find():
+            if str(doc.get("_id")) == invite_id_str or str(doc.get("id")) == invite_id_str or doc.get("token") == invite_id_str or doc.get("email") == invite_id_str:
+                inv = doc
+                break
+
+    if not inv:
+        raise HTTPException(404, "Pending invitation not found")
+    
+    email = inv.get("email", "").lower().strip()
+    await db.invitations.delete_one({"_id": inv["_id"]})
+    await log_activity(db, current, "Deleted pending invitation", "Employees", target=email)
+    return {"ok": True, "message": f"Pending invitation for {email} deleted successfully"}
+
+
+async def _find_user(db, employee_id: str):
+    employee_id_str = str(employee_id).strip()
+    if ObjectId.is_valid(employee_id_str):
+        user = await db.users.find_one({"_id": ObjectId(employee_id_str)})
+        if user:
+            return user
+    user = await db.users.find_one({"_id": employee_id_str})
+    if user:
+        return user
+    user = await db.users.find_one({"email": {"$regex": f"^{re.escape(employee_id_str)}$", "$options": "i"}})
+    return user
 
 
 @router.post("/{employee_id}/reset-password")
-async def reset_employee_password(employee_id: str, payload: dict | None = None,
+async def reset_employee_password(employee_id: str,
+                                  background_tasks: BackgroundTasks,
+                                  payload: dict | None = None,
                                   current: UserPublic = Depends(require_roles("Founder", "Admin"))):
     db = get_db()
-    target = await db.users.find_one({"_id": oid(employee_id)})
+    target = await _find_user(db, employee_id)
     if not target:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Employee not found")
     if target.get("role") == "Founder":
         raise HTTPException(403, "Cannot reset the Founder password from here")
-    new_password = (payload or {}).get("new_password") or _gen_temp_password()
+
+    raw_pwd = (payload or {}).get("new_password")
+    if raw_pwd is not None and str(raw_pwd).strip():
+        raw_pwd = str(raw_pwd).strip()
+        if len(raw_pwd) < 6:
+            raise HTTPException(400, "Password must be at least 6 characters long")
+        new_password = raw_pwd
+    else:
+        new_password = _gen_temp_password()
+
     await db.users.update_one(
-        {"_id": oid(employee_id)},
+        {"_id": target["_id"]},
         {"$set": {"password_hash": hash_password(new_password), "updated_at": utc_iso()}},
     )
     await log_activity(db, current, "Reset password", "Employees", target=target["name"])
     await notify(db, str(target["_id"]), "Your password was reset",
-                 f"{current.name} reset your password. Please sign in with the new temporary password and update it if allowed.",
+                 f"{current.name} reset your password. Please sign in with the new password and update it if allowed.",
                  kind="warning", link="/settings")
-    return {"ok": True, "temp_password": new_password}
+
+    target_email = target.get("email")
+    target_name = target.get("name") or "Employee"
+    if target_email:
+        background_tasks.add_task(
+            send_password_reset_email,
+            recipient_email=target_email,
+            recipient_name=target_name,
+            new_password=new_password,
+            reset_by=current.name,
+        )
+
+    return {
+        "ok": True,
+        "temp_password": new_password,
+        "email": target_email,
+        "message": f"Password reset successfully and email dispatched to {target_email} via Brevo"
+    }
+
+
+@router.patch("/{employee_id}/status")
+async def toggle_employee_status(employee_id: str, payload: dict | None = None,
+                                 current: UserPublic = Depends(require_roles("Founder", "Admin"))):
+    db = get_db()
+    target = await _find_user(db, employee_id)
+    if not target:
+        raise HTTPException(404, "Employee not found")
+    if target.get("role") == "Founder":
+        raise HTTPException(403, "Cannot deactivate the Founder account")
+    if target.get("role") == "Admin" and current.role != "Founder":
+        raise HTTPException(403, "Only the Founder can deactivate an Admin")
+    
+    current_status = target.get("status", "active")
+    req_status = (payload or {}).get("status")
+    if req_status in ("active", "deactivated"):
+        new_status = req_status
+    else:
+        new_status = "deactivated" if current_status == "active" else "active"
+    
+    is_act = (new_status == "active")
+    await db.users.update_one(
+        {"_id": target["_id"]},
+        {"$set": {
+            "status": new_status,
+            "is_active": is_act,
+            "active": is_act,
+            "updated_at": utc_iso()
+        }}
+    )
+    
+    if not is_act:
+        await db.sessions.delete_many({"user_id": str(target["_id"])})
+    
+    action_verb = "Reactivated" if is_act else "Deactivated"
+    await log_activity(db, current, f"{action_verb} employee account", "Employees", target=target["name"])
+    return {
+        "ok": True,
+        "status": new_status,
+        "is_active": is_act,
+        "message": f"Employee {target['name']} is now {new_status}."
+    }
 
 
 @router.patch("/{employee_id}")
@@ -107,19 +427,46 @@ async def update_employee(employee_id: str, payload: dict,
         raise HTTPException(403, "Cannot assign the Founder role")
     if new_role == "Admin" and current.role != "Founder":
         raise HTTPException(403, "Only the Founder can assign the Admin role")
-    target = await db.users.find_one({"_id": oid(employee_id)})
+    target = await _find_user(db, employee_id)
     if not target:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Employee not found")
     if current.role == "Manager" and target.get("department") != current.department:
         raise HTTPException(403, "Managers can only edit teammates in their department")
     payload.pop("id", None); payload.pop("_id", None); payload.pop("password_hash", None); payload.pop("email", None)
     payload["updated_at"] = utc_iso()
-    res = await db.users.update_one({"_id": oid(employee_id)}, {"$set": payload})
+    res = await db.users.update_one({"_id": target["_id"]}, {"$set": payload})
     if res.matched_count == 0:
-        raise HTTPException(404, "Not found")
-    doc = await db.users.find_one({"_id": oid(employee_id)}, {"password_hash": 0})
+        raise HTTPException(404, "Employee not found")
+    doc = await db.users.find_one({"_id": target["_id"]}, {"password_hash": 0})
     await log_activity(db, current, "Updated employee", "Employees", target=doc["name"])
     return serialize(doc)
+
+
+@router.delete("/{employee_id}")
+async def delete_employee(employee_id: str,
+                          current: UserPublic = Depends(require_roles("Founder", "Admin"))):
+    db = get_db()
+    target = await _find_user(db, employee_id)
+    if not target:
+        raise HTTPException(404, "Employee not found")
+    if target.get("role") == "Founder":
+        raise HTTPException(403, "Cannot remove the Founder account")
+    if target.get("role") == "Admin" and current.role != "Founder":
+        raise HTTPException(403, "Only the Founder can remove an Admin")
+    
+    email = target.get("email")
+    # Remove ONLY the user account credentials from db.users.
+    # Preserve all assigned tasks, submitted data, attendance, leave requests, activity logs!
+    await db.users.delete_one({"_id": target["_id"]})
+    await db.sessions.delete_many({"user_id": str(target["_id"])})
+    if email:
+        await db.invitations.delete_many({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    
+    await log_activity(db, current, "Removed employee account", "Employees", target=target["name"])
+    return {
+        "ok": True,
+        "message": f"Employee account for {target['name']} removed. Assigned tasks and submitted data remain intact."
+    }
 
 
 # -------- Departments --------
@@ -234,8 +581,18 @@ async def create_leave(payload: LeaveIn, current: UserPublic = Depends(get_curre
     doc["_id"] = res.inserted_id
     emp = await db.users.find_one({"_id": oid(doc["employee_id"])}, {"name": 1})
     await log_activity(db, current, "Leave requested", "Employees", target=f"{emp['name'] if emp else '—'} · {doc['from_date']} → {doc['to_date']}")
-    await notify(db, None, "Leave request", f"{emp['name'] if emp else 'Employee'} requested {doc['kind']} leave from {doc['from_date']} to {doc['to_date']}.",
-                 kind="warning", link="/employees")
+
+    approvers = await db.users.find(
+        {"role": {"$in": ["Founder", "Admin", "Manager"]}},
+        {"_id": 1},
+    ).to_list(50)
+
+    for a in approvers:
+        await notify(
+            db, str(a["_id"]), "Leave request",
+            f"{emp['name'] if emp else 'Employee'} requested {doc['kind']} leave from {doc['from_date']} to {doc['to_date']}.",
+            kind="warning", link="/employees",
+        )
     return serialize(doc)
 
 
