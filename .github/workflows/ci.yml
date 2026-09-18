@@ -20,7 +20,35 @@ jobs:
     name: Backend Tests & Quality Checks
     runs-on: ubuntu-latest
 
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+
+    env:
+      MONGO_URI: mongodb://127.0.0.1:27017
+      MONGO_URL: mongodb://127.0.0.1:27017
+      MONGODB_URI: mongodb://127.0.0.1:27017
+      MONGODB_URL: mongodb://127.0.0.1:27017
+      DATABASE_URL: mongodb://127.0.0.1:27017
+      DB_NAME: wavygo_ci
+
+      REACT_APP_BACKEND_URL: http://127.0.0.1:8000
+
+      FOUNDER_EMAIL: founder@wavygo.in
+      FOUNDER_NAME: CI Founder
+      FOUNDER_PASSWORD: Wavygo-CI-2026-Test!
+
+      ADMIN_EMAIL: admin@wavygo.in
+      MANAGER_EMAIL: manager@wavygo.in
+      EMPLOYEE_EMAIL: employee@wavygo.in
+      INTERN_EMAIL: intern@wavygo.in
+
+      TEST_PASSWORD: Wavygo-CI-2026-Test!
+
     steps:
+
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
@@ -37,10 +65,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Start Backend
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8000 > backend.log 2>&1 &
+          echo $! > backend.pid
+
+      - name: Prepare CI Test Environment
+        working-directory: backend
+        run: |
+          python ci_setup.py
+
+      - name: Show Backend Log If Setup Fails
+        if: failure()
+        working-directory: backend
+        run: |
+          cat backend.log || true
+
       - name: Run Pytest Test Suite
         working-directory: backend
         run: |
           pytest
+
+      - name: Show Backend Log
+        if: always()
+        working-directory: backend
+        run: |
+          cat backend.log || true
 
 
   frontend-build:
@@ -48,6 +99,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Codebase
         uses: actions/checkout@v4
 

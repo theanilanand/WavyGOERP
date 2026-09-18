@@ -5,15 +5,31 @@ import os
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://app-eta-flax-97.vercel.app").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 API = f"{BASE_URL}/api"
 
-FOUNDER = {"email": os.environ.get("FOUNDER_EMAIL", "anilanand635@gmail.com"), "password": "Wavygo@2026"}
-ADMIN = {"email": "admin@wavygo.in", "password": "Wavygo@2026"}
-MANAGER = {"email": "manager@wavygo.in", "password": "Wavygo@2026"}
-EMPLOYEE = {"email": "employee@wavygo.in", "password": "Wavygo@2026"}
-INTERN = {"email": "intern@wavygo.in", "password": "Wavygo@2026"}
+TEST_PASSWORD = os.environ.get("TEST_PASSWORD", "Wavygo@2026")
 
+FOUNDER = {
+    "email": os.environ.get("FOUNDER_EMAIL", "founder@wavygo.in"),
+    "password": os.environ.get("FOUNDER_PASSWORD", TEST_PASSWORD),
+}
+ADMIN = {
+    "email": os.environ.get("ADMIN_EMAIL", "admin@wavygo.in"),
+    "password": os.environ.get("ADMIN_PASSWORD", TEST_PASSWORD),
+}
+MANAGER = {
+    "email": os.environ.get("MANAGER_EMAIL", "manager@wavygo.in"),
+    "password": os.environ.get("MANAGER_PASSWORD", TEST_PASSWORD),
+}
+EMPLOYEE = {
+    "email": os.environ.get("EMPLOYEE_EMAIL", "employee@wavygo.in"),
+    "password": os.environ.get("EMPLOYEE_PASSWORD", TEST_PASSWORD),
+}
+INTERN = {
+    "email": os.environ.get("INTERN_EMAIL", "intern@wavygo.in"),
+    "password": os.environ.get("INTERN_PASSWORD", TEST_PASSWORD),
+}
 
 @pytest.fixture(scope="module")
 def s():
@@ -164,7 +180,7 @@ def test_update_profile_and_password_roundtrip(s):
     assert r.json()["designation"] != "QA Tester"
 
     # change password to new
-    new_pwd = "Wavygo@2026_TMP"
+    new_pwd = f"{TEST_PASSWORD}_TMP"
     r = s.post(f"{API}/users/me/password", json={"current_password": EMPLOYEE["password"], "new_password": new_pwd}, headers=h)
     assert r.status_code == 200
 

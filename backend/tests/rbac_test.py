@@ -9,17 +9,33 @@ import os
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://app-eta-flax-97.vercel.app").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 API = f"{BASE_URL}/api"
 
-CREDS = {
-    "Founder":  (os.environ.get("FOUNDER_EMAIL", "founder@wavygo.in"),  "Wavygo@2026"),
-    "Admin":    ("admin@wavygo.in",    "Wavygo@2026"),
-    "Manager":  ("manager@wavygo.in",  "Wavygo@2026"),
-    "Employee": ("employee@wavygo.in", "Wavygo@2026"),
-    "Intern":   ("intern@wavygo.in",   "Wavygo@2026"),
-}
+TEST_PASSWORD = os.environ.get("TEST_PASSWORD", "Wavygo@2026")
 
+CREDS = {
+    "Founder": (
+        os.environ.get("FOUNDER_EMAIL", "founder@wavygo.in"),
+        os.environ.get("FOUNDER_PASSWORD", TEST_PASSWORD),
+    ),
+    "Admin": (
+        os.environ.get("ADMIN_EMAIL", "admin@wavygo.in"),
+        os.environ.get("ADMIN_PASSWORD", TEST_PASSWORD),
+    ),
+    "Manager": (
+        os.environ.get("MANAGER_EMAIL", "manager@wavygo.in"),
+        os.environ.get("MANAGER_PASSWORD", TEST_PASSWORD),
+    ),
+    "Employee": (
+        os.environ.get("EMPLOYEE_EMAIL", "employee@wavygo.in"),
+        os.environ.get("EMPLOYEE_PASSWORD", TEST_PASSWORD),
+    ),
+    "Intern": (
+        os.environ.get("INTERN_EMAIL", "intern@wavygo.in"),
+        os.environ.get("INTERN_PASSWORD", TEST_PASSWORD),
+    ),
+}
 
 def _login(email, password):
     r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=15)
@@ -56,13 +72,13 @@ def test_change_own_password_gates(tokens):
     for role in ("Employee", "Intern"):
         r = requests.post(f"{API}/users/me/password",
                           headers=H(tokens, role),
-                          json={"current_password": "Wavygo@2026", "new_password": "Wavygo@2026"})
+                          json={"current_password": TEST_PASSWORD, "new_password": TEST_PASSWORD})
         assert r.status_code == 403, f"{role} change_password expected 403 got {r.status_code}: {r.text}"
 
     # Manager -> 200
     r = requests.post(f"{API}/users/me/password",
                       headers=H(tokens, "Manager"),
-                      json={"current_password": "Wavygo@2026", "new_password": "Wavygo@2026"})
+                      json={"current_password": TEST_PASSWORD, "new_password": TEST_PASSWORD})
     assert r.status_code == 200, f"Manager change_password expected 200 got {r.status_code}: {r.text}"
 
 
@@ -190,19 +206,19 @@ def test_register_gating(tokens):
     # Employee/Intern -> 403
     for role in ("Employee", "Intern", "Manager"):
         r = requests.post(f"{API}/auth/register", headers=H(tokens, role),
-                          json={"email": f"test_reg_{role}@wavygo.in", "password": "Wavygo@2026",
+                          json={"email": f"test_reg_{role}@wavygo.in", "password": TEST_PASSWORD,
                                 "name": "X", "role": "Employee"})
         assert r.status_code == 403, f"{role} register expected 403 got {r.status_code}: {r.text}"
 
     # Admin cannot create Admin
     r = requests.post(f"{API}/auth/register", headers=H(tokens, "Admin"),
-                      json={"email": "test_admin_by_admin@wavygo.in", "password": "Wavygo@2026",
+                      json={"email": "test_admin_by_admin@wavygo.in", "password": TEST_PASSWORD,
                             "name": "X", "role": "Admin"})
     assert r.status_code == 403, f"Admin creating Admin expected 403 got {r.status_code}: {r.text}"
 
     # Admin cannot create Founder
     r = requests.post(f"{API}/auth/register", headers=H(tokens, "Admin"),
-                      json={"email": "test_founder_by_admin@wavygo.in", "password": "Wavygo@2026",
+                      json={"email": "test_founder_by_admin@wavygo.in", "password": TEST_PASSWORD,
                             "name": "X", "role": "Founder"})
     assert r.status_code == 403, f"Admin creating Founder expected 403 got {r.status_code}: {r.text}"
 
