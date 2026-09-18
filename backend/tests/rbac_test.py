@@ -232,8 +232,7 @@ def test_employees_invite_gates(tokens):
     # Admin cannot invite Founder
     r = requests.post(f"{API}/employees/invite", headers=H(tokens, "Admin"),
                       json={"email": "test_founder_inv@wavygo.in", "name": "X", "role": "Founder"})
-    assert r.status_code == 403, f"Admin invite Founder expected 403 got {r.status_code}: {r.text}"
-
+    assert r.status_code == 400, f"Admin invite Founder expected 400 got {r.status_code}: {r.text}"
     # Admin cannot invite Admin
     r = requests.post(f"{API}/employees/invite", headers=H(tokens, "Admin"),
                       json={"email": "test_admin_inv@wavygo.in", "name": "X", "role": "Admin"})

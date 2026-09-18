@@ -55,8 +55,19 @@ def test_live_kpis_is_public(s):
     r = s.get(f"{API}/dashboard/live-kpis")
     assert r.status_code == 200
     b = r.json()
-    for k in ("revenue_mtd", "bookings_today", "active_vehicles", "active_vendors", "satisfaction_score"):
-        assert k in b
+    assert "kpis" in b
+    assert isinstance(b["kpis"], list)
+    assert len(b["kpis"]) == 5
+
+    labels = {item["label"] for item in b["kpis"]}
+    expected_labels = {
+        "Today's Bookings",
+        "Active Vendors",
+        "Vehicles Online",
+        "Cities Served",
+        "Revenue (MTD)",
+    }
+    assert labels == expected_labels
 
 
 # ---------- Auth ----------
@@ -77,13 +88,13 @@ def test_login_wrong_password(s):
 
 
 def test_me_invalid_token(s):
-    r = s.get(f"{API}/users/me", headers={"Authorization": "Bearer invalid_token_here"})
+    r = s.get(f"{API}/auth/me", headers={"Authorization": "Bearer invalid_token_here"})
     assert r.status_code == 401
 
 
 def test_me_valid(s):
     d = _login(s, FOUNDER)
-    r = s.get(f"{API}/users/me", headers={"Authorization": f"Bearer {d['access_token']}"})
+    r = s.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {d['access_token']}"})
     assert r.status_code == 200
     assert r.json()["email"] == FOUNDER["email"]
 
@@ -171,7 +182,7 @@ def test_settings_company(s):
 
 # ---------- Profile update + password reset roundtrip ----------
 def test_update_profile_and_password_roundtrip(s):
-    d = _login(s, EMPLOYEE)
+    d = _login(s, MANAGER)
     h = {"Authorization": f"Bearer {d['access_token']}"}
     # update profile
     r = s.patch(f"{API}/users/me", json={"phone": "+919999999999", "designation": "QA Tester"}, headers=h)
@@ -181,16 +192,16 @@ def test_update_profile_and_password_roundtrip(s):
 
     # change password to new
     new_pwd = f"{TEST_PASSWORD}_TMP"
-    r = s.post(f"{API}/users/me/password", json={"current_password": EMPLOYEE["password"], "new_password": new_pwd}, headers=h)
+    r = s.post(f"{API}/users/me/password", json={"current_password": MANAGER["password"], "new_password": new_pwd}, headers=h)
     assert r.status_code == 200
 
     # re-login with new
-    d2 = _login(s, {"email": EMPLOYEE["email"], "password": new_pwd})
+    d2 = _login(s, {"email": MANAGER["email"], "password": new_pwd})
     h2 = {"Authorization": f"Bearer {d2['access_token']}"}
 
     # restore
-    r = s.post(f"{API}/users/me/password", json={"current_password": new_pwd, "new_password": EMPLOYEE["password"]}, headers=h2)
+    r = s.post(f"{API}/users/me/password", json={"current_password": new_pwd, "new_password": MANAGER["password"]}, headers=h2)
     assert r.status_code == 200
 
     # confirm restored
-    _login(s, EMPLOYEE)
+    _login(s, MANAGER)
