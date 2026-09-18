@@ -35,9 +35,6 @@ async def _ensure_user(db, email: str, password: str, name: str, role: str, desi
         return str(res.inserted_id)
     # Update password if changed, keep other fields fresh
     updates = dict(doc)
-    from auth_utils import verify_password
-    if not verify_password(password, existing.get("password_hash", "")):
-        updates["password_hash"] = hash_password(password)
     await db.users.update_one({"_id": existing["_id"]}, {"$set": updates})
     return str(existing["_id"])
 
@@ -64,7 +61,7 @@ async def seed_all():
         )
 
     for spec in ROLE_ACCOUNTS:
-        email = os.environ.get(spec.get("email_env", ""), spec.get("email", "anil@wavygo.in"))
-        password = os.environ.get(spec.get("password_env", ""), spec.get("password", "Wavygo@2026"))
-        name = os.environ.get(spec.get("name_env", ""), spec.get("name", "Anil Anand"))
+        email = os.environ.get(spec.get("email_env", ""))
+        password = os.environ.get(spec.get("password_env", ""))
+        name = os.environ.get(spec.get("name_env", ""))
         await _ensure_user(db, email, password, name, spec["role"], spec["designation"], spec["department"])
